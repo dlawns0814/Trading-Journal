@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>매매 일지 — Process over Picks</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📊</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700&family=Source+Code+Pro:wght@400;600&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Noto Sans KR', 'system-ui', 'sans-serif'],
+            mono: ['Source Code Pro', 'ui-monospace', 'monospace'],
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #09090b; }
+    ::selection { background: #f59e0b33; }
+    input[type="date"]::-webkit-calendar-picker-indicator { filter: invert(0.7); }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #3f3f46; border-radius: 3px; }
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useMemo } = React;
+
+const STORAGE_KEY = "junhyung_trades";
+
+const THEMES = [
+  "희토류/핵심광물 롱", "우라늄 롱", "매크로/원자재(유가·FX)",
+  "AI인프라 숏", "양자/스페이스/크립토 숏", "스토리주 숏(기타)",
+  "개별주 롱", "지수 옵션", "기타",
+];
+
+const VEHICLES = [
+  "주식", "콜 (단기, 1달내)", "콜 (장기)", "풋 (단기, 1달내)",
+  "풋 (장기)", "스프레드", "데일리 레버리지 ETF/ETN", "기타",
+];
+
+const HORIZONS = ["당일~며칠", "몇 주", "몇 달", "장기"];
+const SHORT_VEHICLE = new Set(["콜 (단기, 1달내)", "풋 (단기, 1달내)", "데일리 레버리지 ETF/ETN"]);
+const LONG_HORIZON = new Set(["몇 주", "몇 달", "장기"]);
+
+const load = () => { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch { return []; } };
+const save = (data) => localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+const fmtMoney = (n) => isNaN(n) || n === null || n === "" ? "—" : Number(n).toLocaleString("ko-KR");
+const fmtDate = (d) => d ? new Date(d).toLocaleDateString("ko-KR", { month: "short", day: "numeric" }) : "";
+
+const emptyForm = {
+  ticker: "", direction: "long", vehicle: "주식", thesis: "", reasons: "",
+  invalidation: "", horizon: "몇 주", theme: THEMES[0], catalyst: "",
+  catalystDate: "", maxLoss: "", entryPrice: "", entryDate: new Date().toISOString().slice(0, 10),
+};
+
+function App() {
+  const [trades, setTrades] = useState(load);
+  const [view, setView] = useState("gate");
+  const [form, setForm] = useState(emptyForm);
+  const [errors, setErrors] = useState({});
+  const [closingId, setClosingId] = useState(null);
+  const [closeForm, setCloseForm] = useState({ exitPrice: "", pnl: "", thesisRight: null, note: "" });
+  const [toast, setToast] = useState(null);
+
+  useEffect(() => { save(trades); }, [trades]);
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2500); };
+
+  const open = trades.filter(t => t.status === "open");
+  const closed = trades.filter(t => t.status === "closed");
+
+  const vehicleMismatch = SHORT_VEHICLE.has(form.vehicle) && LONG_HORIZON.has(form.horizon);
+
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
+
+  const validate = () => {
+    const e = {};
+    if (!form.ticker.trim()) e.ticker = "티커 입력";
+    if (!form.thesis.trim()) e.thesis = "thesis 한 줄은 필수";
+    if (!form.invalidation.trim()) e.invalidation = "무효화 조건 없으면 진입 금지";
+    if (form.direction === "short" && (!form.catalyst.trim() || !form.catalystDate))
+      e.catalyst = "숏은 임박한 카탈리스트 + 날짜 필수";
+    setErrors(e);
+    return Object.keys(e).length === 0;
+  };
+
+  const submit = () => {
+    if (!validate()) return;
+    const t = { ...form, id: Date.now().toString(36) + Math.random().toString(36).slice(2,6), status: "open", createdAt: new Date().toISOString() };
+    setTrades([t, ...trades]);
+    setForm({ ...emptyForm, entryDate: new Date().toISOString().slice(0, 10) });
+    setErrors({});
+    showToast(`${t.ticker} 포지션 기록됨`);
+    setView("positions");
+  };
+
+  const beginClose = (id) => { setClosingId(id); setCloseForm({ exitPrice: "", pnl: "", thesisRight: null, note: "" }); };
+
+  const confirmClose = (id) => {
+    if (closeForm.thesisRight === null || closeForm.pnl === "") return;
+    setTrades(trades.map(t => t.id === id ? { ...t, status: "closed", exitPrice: closeForm.exitPrice, pnl: Number(closeForm.pnl), thesisRight: closeForm.thesisRight, note: closeForm.note, closedAt: new Date().toISOString() } : t));
+    setClosingId(null);
+    showToast("청산 기록 완료 → 복기 탭에서 확인");
+  };
+
+  const remove = (id) => { if (confirm("이 기록을 삭제할까?")) setTrades(trades.filter(t => t.id !== id)); };
+
+  const quadrant = (t) => {
+    const won = t.pnl > 0;
+    if (t.thesisRight && won) return "skill";
+    if (!t.thesisRight && won) return "luck";
+    if (t.thesisRight && !won) return "structure";
+    return "normal";
+  };
+
+  const quad = useMemo(() => {
+    const g = { skill: [], luck: [], structure: [], normal: [] };
+    closed.forEach(t => g[quadrant(t)].push(t));
+    return g;
+  }, [closed]);
+
+  const concentration = useMemo(() => {
+    const total = open.reduce((s, t) => s + (Number(t.maxLoss) || 0), 0);
+    const byTheme = {};
+    open.forEach(t => { byTheme[t.theme] = (byTheme[t.theme] || 0) + (Number(t.maxLoss) || 0); });
+    return Object.entries(byTheme).map(([theme, risk]) => ({ theme, risk, pct: total ? (risk / total) * 100 : 0 })).sort((a, b) => b.risk - a.risk);
+  }, [open]);
+
+  const totalRealized = closed.reduce((s, t) => s + (Number(t.pnl) || 0), 0);
+
+  // Export / Import
+  const exportData = () => {
+    const blob = new Blob([JSON.stringify(trades, null, 2)], { type: "application/json" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
+    a.download = `trades_${new Date().toISOString().slice(0,10)}.json`; a.click();
+  };
+  const importData = () => {
+    const input = document.createElement("input"); input.type = "file"; input.accept = ".json";
+    input.onchange = (e) => {
+      const reader = new FileReader();
+      reader.onload = (ev) => { try { const d = JSON.parse(ev.target.result); if (Array.isArray(d)) { setTrades(d); showToast(`${d.length}건 불러옴`); } } catch { showToast("파일 형식 오류"); } };
+      reader.readAsText(e.target.files[0]);
+    };
+    input.click();
+  };
+
+  const card = "rounded-lg border border-zinc-800 bg-zinc-900/80 backdrop-blur-sm";
+  const label = "block text-xs font-medium tracking-wide text-zinc-400 mb-1.5";
+  const inputCls = "w-full rounded-md border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-sm text-zinc-100 placeholder-zinc-600 outline-none focus:border-amber-500/60 transition-colors";
+
+  const NavBtn = ({ id, children, badge }) => (
+    <button onClick={() => setView(id)} className={"px-4 py-2.5 text-sm font-medium tracking-wide transition-all border-b-2 " + (view === id ? "border-amber-500 text-amber-400" : "border-transparent text-zinc-500 hover:text-zinc-300")}>
+      {children}
+      {badge != null && <span className="ml-2 rounded-full bg-zinc-800 px-2 py-0.5 text-xs text-zinc-400 font-mono">{badge}</span>}
+    </button>
+  );
+
+  return (
+    <div className="min-h-screen bg-zinc-950 text-zinc-200 font-sans">
+      {/* Toast */}
+      {toast && <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 rounded-lg border border-amber-800/50 bg-amber-950/90 px-5 py-2.5 text-sm text-amber-200 shadow-lg backdrop-blur-sm animate-pulse">{toast}</div>}
+
+      <div className="mx-auto max-w-3xl px-5 py-8">
+        {/* Header */}
+        <div className="mb-8">
+          <h1 className="text-2xl font-bold tracking-tight text-zinc-100" style={{fontFamily:"Georgia, 'Noto Serif KR', serif"}}>
+            매매 일지 <span className="text-amber-500">/</span> <span className="text-zinc-500 text-base font-normal font-sans">Process over Picks</span>
+          </h1>
+          <p className="mt-1.5 text-xs text-zinc-600">게이트 통과 → 얇은 로그 → 2×2 복기. 결과가 아니라 의사결정을 기록한다.</p>
+          <div className="mt-3 flex gap-3 text-xs">
+            <button onClick={exportData} className="text-zinc-600 hover:text-zinc-400 transition-colors">↓ 내보내기</button>
+            <button onClick={importData} className="text-zinc-600 hover:text-zinc-400 transition-colors">↑ 불러오기</button>
+          </div>
+        </div>
+
+        {/* Nav */}
+        <div className="mb-6 flex gap-1 border-b border-zinc-800">
+          <NavBtn id="gate">진입 게이트</NavBtn>
+          <NavBtn id="positions" badge={open.length}>포지션</NavBtn>
+          <NavBtn id="review" badge={closed.length}>복기</NavBtn>
+        </div>
+
+        {/* ========== GATE ========== */}
+        {view === "gate" && (
+          <div className={card + " p-6"}>
+            <div className="mb-5 flex items-baseline justify-between">
+              <h2 className="text-sm font-semibold tracking-wide text-zinc-300">진입 전 5문항</h2>
+              <span className="text-xs text-zinc-600 italic">통과 못 하면 진입하지 않는다</span>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className={label}>티커 / 종목</label>
+                <input className={inputCls} value={form.ticker} onChange={e => set("ticker", e.target.value.toUpperCase())} placeholder="GOOGL" />
+                {errors.ticker && <p className="mt-1 text-xs text-rose-400">{errors.ticker}</p>}
+              </div>
+              <div>
+                <label className={label}>방향</label>
+                <div className="flex gap-2">
+                  {["long","short"].map(d => (
+                    <button key={d} onClick={() => set("direction", d)} className={"flex-1 rounded-md border px-3 py-2.5 text-sm font-medium transition-all " + (form.direction === d ? (d === "long" ? "border-emerald-600 bg-emerald-950/60 text-emerald-300 shadow-inner shadow-emerald-900/30" : "border-rose-600 bg-rose-950/60 text-rose-300 shadow-inner shadow-rose-900/30") : "border-zinc-700 text-zinc-500 hover:border-zinc-600")}>
+                      {d === "long" ? "롱 ▲" : "숏 ▼"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="mt-5">
+              <label className={label}>① 왜 지금? — thesis 한 줄</label>
+              <input className={inputCls} value={form.thesis} onChange={e => set("thesis", e.target.value)} placeholder="지정학 디스카운트로 눌렸고 OI 구조상 적정가 괴리" />
+              {errors.thesis && <p className="mt-1 text-xs text-rose-400">{errors.thesis}</p>}
+            </div>
+
+            <div className="mt-4">
+              <label className={label}>독립적 이유 나열 — <span className="text-zinc-600">이게 다 같은 이유의 변형은 아닌지 자문</span></label>
+              <textarea className={inputCls + " h-24 resize-none"} value={form.reasons} onChange={e => set("reasons", e.target.value)} placeholder={"1. ...\n2. ...\n3. ... (GOOGL=독립 3개 ✓ / CRM=같은 이유 3개 ✗)"} />
+            </div>
+
+            <div className="mt-4">
+              <label className={label}>② 무효화 조건 — 어디까지 가면 내가 틀린 거냐</label>
+              <input className={inputCls} value={form.invalidation} onChange={e => set("invalidation", e.target.value)} placeholder="종가 $172 하회 시 / 실적 가이던스 하향 시" />
+              {errors.invalidation && <p className="mt-1 text-xs text-rose-400">{errors.invalidation}</p>}
+            </div>
+
+            <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div>
+                <label className={label}>③ 도구</label>
+                <select className={inputCls} value={form.vehicle} onChange={e => set("vehicle", e.target.value)}>
+                  {VEHICLES.map(v => <option key={v}>{v}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className={label}>thesis 호라이즌</label>
+                <select className={inputCls} value={form.horizon} onChange={e => set("horizon", e.target.value)}>
+                  {HORIZONS.map(h => <option key={h}>{h}</option>)}
+                </select>
+              </div>
+            </div>
+            {vehicleMismatch && (
+              <div className="mt-3 rounded-md border border-amber-700/40 bg-amber-950/30 px-4 py-3 text-xs text-amber-300 leading-relaxed">
+                ⚠ <strong>도구-호라이즌 미스매치:</strong> {form.horizon}짜리 thesis를 단기/감쇠형 도구로 표현하면 theta·decay가 엣지를 먹는다. NBIS 2x 인버스 패턴을 기억하라.
+              </div>
+            )}
+
+            <div className="mt-4">
+              <label className={label}>④ 테마 태그 — 이미 들고 있는 베팅의 복제인가?</label>
+              <select className={inputCls} value={form.theme} onChange={e => set("theme", e.target.value)}>
+                {THEMES.map(t => <option key={t}>{t}</option>)}
+              </select>
+            </div>
+
+            {form.direction === "short" && (
+              <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className={label}>카탈리스트 (숏 필수)</label>
+                  <input className={inputCls} value={form.catalyst} onChange={e => set("catalyst", e.target.value)} placeholder="록업 해제 / 증자 공시 / 실적" />
+                </div>
+                <div>
+                  <label className={label}>예상 날짜</label>
+                  <input type="date" className={inputCls} value={form.catalystDate} onChange={e => set("catalystDate", e.target.value)} />
+                </div>
+                {errors.catalyst && <p className="sm:col-span-2 -mt-1 text-xs text-rose-400">{errors.catalyst}</p>}
+              </div>
+            )}
+
+            <div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div>
+                <label className={label}>⑤ 최대손실 (원)</label>
+                <input className={inputCls} inputMode="numeric" value={form.maxLoss} onChange={e => set("maxLoss", e.target.value.replace(/[^0-9]/g,""))} placeholder="2,000,000" />
+              </div>
+              <div>
+                <label className={label}>진입가</label>
+                <input className={inputCls} value={form.entryPrice} onChange={e => set("entryPrice", e.target.value)} placeholder="$1.35" />
+              </div>
+              <div>
+                <label className={label}>진입일</label>
+                <input type="date" className={inputCls} value={form.entryDate} onChange={e => set("entryDate", e.target.value)} />
+              </div>
+            </div>
+
+            <button onClick={submit} className="mt-7 w-full rounded-md bg-amber-500 py-3 text-sm font-bold text-zinc-950 hover:bg-amber-400 transition-colors tracking-wide">
+              게이트 통과 — 포지션 기록
+            </button>
+          </div>
+        )}
+
+        {/* ========== POSITIONS ========== */}
+        {view === "positions" && (
+          <div className="space-y-3">
+            {open.length === 0 && (
+              <div className={card + " p-10 text-center text-sm text-zinc-600"}>열린 포지션 없음.<br/>진입 게이트에서 기록하면 여기 쌓인다.</div>
+            )}
+            {open.map(t => (
+              <div key={t.id} className={card + " p-5 hover:border-zinc-700 transition-colors"}>
+                <div className="flex items-start justify-between">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-lg font-bold font-mono text-zinc-100">{t.ticker}</span>
+                    <span className={"rounded-full px-2 py-0.5 text-xs font-medium " + (t.direction === "long" ? "bg-emerald-950 text-emerald-400 border border-emerald-800/50" : "bg-rose-950 text-rose-400 border border-rose-800/50")}>
+                      {t.direction === "long" ? "롱" : "숏"}
+                    </span>
+                    <span className="text-xs text-zinc-500">{t.vehicle}</span>
+                  </div>
+                  <span className="rounded-full bg-zinc-800/80 px-2.5 py-0.5 text-xs text-zinc-400">{t.theme}</span>
+                </div>
+                <p className="mt-3 text-sm text-zinc-300 leading-relaxed">{t.thesis}</p>
+                <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-zinc-500">
+                  <div><span className="text-zinc-600 font-medium">무효화:</span> {t.invalidation}</div>
+                  <div><span className="text-zinc-600 font-medium">호라이즌:</span> {t.horizon} · 진입 {t.entryPrice || "—"} ({fmtDate(t.entryDate)})</div>
+                  {t.maxLoss && <div><span className="text-zinc-600 font-medium">최대손실:</span> {fmtMoney(t.maxLoss)}원</div>}
+                  {t.direction === "short" && t.catalyst && <div><span className="text-zinc-600 font-medium">카탈리스트:</span> {t.catalyst} ({fmtDate(t.catalystDate)})</div>}
+                </div>
+
+                {closingId === t.id ? (
+                  <div className="mt-4 rounded-md border border-zinc-700 bg-zinc-950/80 p-4">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                      <div>
+                        <label className={label}>청산가</label>
+                        <input className={inputCls} value={closeForm.exitPrice} onChange={e => setCloseForm(f => ({ ...f, exitPrice: e.target.value }))} placeholder="$8.00" />
+                      </div>
+                      <div>
+                        <label className={label}>손익 (원, +/-)</label>
+                        <input className={inputCls} value={closeForm.pnl} onChange={e => setCloseForm(f => ({ ...f, pnl: e.target.value.replace(/[^0-9-]/g,"") }))} placeholder="-2000000" />
+                      </div>
+                    </div>
+                    <div className="mt-4">
+                      <label className={label}>thesis는 맞았나? (결과와 별개로)</label>
+                      <div className="flex gap-2">
+                        <button onClick={() => setCloseForm(f => ({ ...f, thesisRight: true }))} className={"flex-1 rounded-md border px-3 py-2.5 text-sm font-medium transition-all " + (closeForm.thesisRight === true ? "border-sky-600 bg-sky-950/60 text-sky-300" : "border-zinc-700 text-zinc-500 hover:border-zinc-600")}>
+                          맞았음
+                        </button>
+                        <button onClick={() => setCloseForm(f => ({ ...f, thesisRight: false }))} className={"flex-1 rounded-md border px-3 py-2.5 text-sm font-medium transition-all " + (closeForm.thesisRight === false ? "border-orange-600 bg-orange-950/60 text-orange-300" : "border-zinc-700 text-zinc-500 hover:border-zinc-600")}>
+                          틀렸음
+                        </button>
+                      </div>
+                    </div>
+                    <input className={inputCls + " mt-4"} value={closeForm.note} onChange={e => setCloseForm(f => ({ ...f, note: e.target.value }))} placeholder="복기 한 줄 (선택)" />
+                    <div className="mt-4 flex gap-2">
+                      <button onClick={() => confirmClose(t.id)} disabled={closeForm.thesisRight === null || closeForm.pnl === ""} className="flex-1 rounded-md bg-amber-500 py-2.5 text-sm font-bold text-zinc-950 disabled:opacity-30 hover:bg-amber-400 transition-colors">
+                        청산 확정 → 복기로
+                      </button>
+                      <button onClick={() => setClosingId(null)} className="rounded-md border border-zinc-700 px-4 text-sm text-zinc-400 hover:text-zinc-300 transition-colors">취소</button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="mt-4 flex gap-2">
+                    <button onClick={() => beginClose(t.id)} className="rounded-md border border-zinc-700 px-4 py-2 text-xs text-zinc-300 hover:border-amber-600 hover:text-amber-400 transition-colors">청산 / 복기</button>
+                    <button onClick={() => remove(t.id)} className="rounded-md px-4 py-2 text-xs text-zinc-700 hover:text-rose-400 transition-colors">삭제</button>
+                  </div>
+                )}
+              </div>
+            ))}
+
+            {open.length > 0 && (
+              <div className={card + " p-5"}>
+                <h3 className="mb-4 text-xs font-semibold tracking-widest text-zinc-500 uppercase">테마 집중도 — 열린 포지션 최대손실 기준</h3>
+                {concentration.map(c => (
+                  <div key={c.theme} className="mb-3">
+                    <div className="mb-1.5 flex justify-between text-xs">
+                      <span className="text-zinc-400">{c.theme}</span>
+                      <span className={"font-mono " + (c.pct > 30 ? "text-rose-400 font-semibold" : "text-zinc-500")}>{c.pct.toFixed(0)}% · {fmtMoney(c.risk)}원</span>
+                    </div>
+                    <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-800">
+                      <div className={"h-full rounded-full transition-all duration-500 " + (c.pct > 30 ? "bg-rose-500" : c.pct > 20 ? "bg-amber-600" : "bg-zinc-500")} style={{ width: Math.min(c.pct, 100) + "%" }} />
+                    </div>
+                  </div>
+                ))}
+                {concentration.some(c => c.pct > 30) && (
+                  <p className="mt-3 text-xs text-rose-400 leading-relaxed">⚠ 한 테마가 30% 초과 — 종목 수와 무관하게 단일 베팅에 몰려 있다.</p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ========== REVIEW ========== */}
+        {view === "review" && (
+          <div className="space-y-4">
+            {closed.length === 0 ? (
+              <div className={card + " p-10 text-center text-sm text-zinc-600"}>청산된 트레이드가 없음.<br/>포지션을 청산하면 여기서 2×2로 분류된다.</div>
+            ) : (
+              <>
+                <div className="flex items-center justify-between px-1 text-xs">
+                  <span className="text-zinc-500 font-mono">청산 {closed.length}건</span>
+                  <span className={"font-mono font-semibold " + (totalRealized >= 0 ? "text-emerald-400" : "text-rose-400")}>
+                    실현손익 {totalRealized >= 0 ? "+" : ""}{fmtMoney(totalRealized)}원
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <QuadCard title="실력" sub="맞고 + 벌었" color="emerald" note="이 트레이드를 반복해라" list={quad.skill} />
+                  <QuadCard title="운" sub="틀리고 + 벌었" color="amber" note="제일 위험한 승리 — 나쁜 습관이 강화된다" list={quad.luck} />
+                  <QuadCard title="구조 문제" sub="맞고 + 잃었" color="sky" note="사이징·타이밍·도구를 고쳐라" list={quad.structure} />
+                  <QuadCard title="정상" sub="틀리고 + 잃었" color="zinc" note="thesis 자체를 다시 봐" list={quad.normal} />
+                </div>
+
+                <div className={card + " p-4"}>
+                  <div className="flex gap-6 text-xs text-zinc-500">
+                    <div>
+                      <span className="text-zinc-600">승률:</span>{" "}
+                      <span className="font-mono text-zinc-300">{(closed.filter(t => t.pnl > 0).length / closed.length * 100).toFixed(0)}%</span>
+                    </div>
+                    <div>
+                      <span className="text-zinc-600">실력 비중:</span>{" "}
+                      <span className="font-mono text-emerald-400">{(quad.skill.length / closed.length * 100).toFixed(0)}%</span>
+                    </div>
+                    <div>
+                      <span className="text-zinc-600">구조 문제 비중:</span>{" "}
+                      <span className="font-mono text-sky-400">{(quad.structure.length / closed.length * 100).toFixed(0)}%</span>
+                    </div>
+                  </div>
+                  <p className="mt-3 text-xs text-zinc-600 leading-relaxed">
+                    손실이 <span className="text-sky-400">구조 문제</span>에 몰리면 종목 선정이 아니라 트레이드 구성을 고쳐야 한다 (고치기 쉬움).<br/>
+                    수익이 <span className="text-amber-400">운</span>에 쌓이면 곧 토해낼 신호다.
+                  </p>
+                </div>
+
+                {/* Closed trades list */}
+                <details className="group">
+                  <summary className="cursor-pointer text-xs text-zinc-600 hover:text-zinc-400 transition-colors py-2">
+                    전체 청산 기록 보기 ▾
+                  </summary>
+                  <div className="mt-2 space-y-2">
+                    {closed.map(t => {
+                      const q = quadrant(t);
+                      const qColors = { skill: "border-l-emerald-500", luck: "border-l-amber-500", structure: "border-l-sky-500", normal: "border-l-zinc-600" };
+                      const qLabels = { skill: "실력", luck: "운", structure: "구조", normal: "정상" };
+                      return (
+                        <div key={t.id} className={"rounded-md border border-zinc-800 bg-zinc-900/50 p-3 border-l-2 " + qColors[q]}>
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono font-semibold text-sm text-zinc-200">{t.ticker}</span>
+                              <span className={"text-xs " + (t.direction === "long" ? "text-emerald-500" : "text-rose-500")}>{t.direction === "long" ? "롱" : "숏"}</span>
+                              <span className="text-xs text-zinc-600">{qLabels[q]}</span>
+                            </div>
+                            <span className={"font-mono text-sm font-semibold " + (t.pnl >= 0 ? "text-emerald-400" : "text-rose-400")}>{t.pnl >= 0 ? "+" : ""}{fmtMoney(t.pnl)}</span>
+                          </div>
+                          <p className="mt-1 text-xs text-zinc-500">{t.thesis}</p>
+                          {t.note && <p className="mt-1 text-xs text-zinc-600 italic">"{t.note}"</p>}
+                          <div className="mt-1 text-xs text-zinc-700">{fmtDate(t.entryDate)} → {fmtDate(t.closedAt)} · {t.entryPrice} → {t.exitPrice}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </details>
+              </>
+            )}
+
+            {trades.length > 0 && (
+              <button onClick={() => { if (confirm("모든 기록을 삭제할까? 되돌릴 수 없음.")) { setTrades([]); showToast("초기화 완료"); }}} className="text-xs text-zinc-700 hover:text-rose-500 transition-colors mt-4">
+                전체 데이터 초기화
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Footer */}
+        <div className="mt-12 pb-8 text-center text-xs text-zinc-800">
+          분석 70점인데 트레이드 구성이 40점이라 결과가 50점에 머무는 구조를 깨라.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function QuadCard({ title, sub, color, note, list }) {
+  const styles = {
+    emerald: "border-emerald-800/60 bg-emerald-950/20",
+    amber: "border-amber-800/60 bg-amber-950/20",
+    sky: "border-sky-800/60 bg-sky-950/20",
+    zinc: "border-zinc-700 bg-zinc-900/50",
+  };
+  const titleColors = { emerald: "text-emerald-300", amber: "text-amber-300", sky: "text-sky-300", zinc: "text-zinc-300" };
+  const numColors = { emerald: "text-emerald-400", amber: "text-amber-400", sky: "text-sky-400", zinc: "text-zinc-400" };
+
+  return (
+    <div className={"rounded-lg border p-5 transition-colors hover:border-opacity-80 " + styles[color]}>
+      <div className="flex items-baseline justify-between">
+        <span className={"text-sm font-bold " + titleColors[color]}>{title}</span>
+        <span className={"text-3xl font-bold font-mono " + numColors[color]}>{list.length}</span>
+      </div>
+      <div className="text-xs text-zinc-500 mt-0.5">{sub}</div>
+      <div className="mt-2 text-xs text-zinc-600 leading-relaxed">{note}</div>
+      {list.length > 0 && (
+        <div className="mt-3 space-y-1.5 border-t border-white/5 pt-3">
+          {list.map(t => (
+            <div key={t.id} className="flex justify-between text-xs">
+              <span className="font-mono font-medium text-zinc-300">{t.ticker}</span>
+              <span className={"font-mono " + (t.pnl >= 0 ? "text-emerald-400" : "text-rose-400")}>{t.pnl >= 0 ? "+" : ""}{fmtMoney(t.pnl)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
