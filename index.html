@@ -60,6 +60,12 @@ const LONG_HORIZON = new Set(["몇 주", "몇 달", "장기"]);
 
 const load = () => { try { return JSON.parse(localStorage.getItem(STORAGE_KEY)) || []; } catch { return []; } };
 const save = (data) => localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+
+const JOURNAL_KEY = "junhyung_journal";
+const loadJournal = () => { try { return JSON.parse(localStorage.getItem(JOURNAL_KEY)) || { folders: [], notes: [] }; } catch { return { folders: [], notes: [] }; } };
+const saveJournal = (data) => localStorage.setItem(JOURNAL_KEY, JSON.stringify(data));
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+const fmtFull = (d) => d ? new Date(d).toLocaleDateString("ko-KR", { year: "numeric", month: "long", day: "numeric", weekday: "short" }) : "";
 const fmtMoney = (n) => isNaN(n) || n === null || n === "" ? "—" : Number(n).toLocaleString("ko-KR");
 const fmtDate = (d) => d ? new Date(d).toLocaleDateString("ko-KR", { month: "short", day: "numeric" }) : "";
 
@@ -138,6 +144,14 @@ function App() {
   const [closeForm, setCloseForm] = useState({ exitPrice: "", pnl: "", thesisRight: null, note: "" });
   const [toast, setToast] = useState(null);
   const [dark, setDark] = useState(() => localStorage.getItem(THEME_KEY) === "dark");
+
+  // ---- journal state ----
+  const [journal, setJournal] = useState(loadJournal);
+  const [curFolder, setCurFolder] = useState(null);   // 현재 폴더 id (null = 루트)
+  const [editingId, setEditingId] = useState(null);    // 편집 중인 글 id ("new" = 새 글, null = 목록)
+  const [draft, setDraft] = useState({ title: "", body: "", date: "" });
+
+  useEffect(() => { saveJournal(journal); }, [journal]);
 
   useEffect(() => { save(trades); }, [trades]);
   useEffect(() => {
@@ -222,6 +236,75 @@ function App() {
     input.click();
   };
 
+  // ---- journal helpers ----
+  const descendantFolderIds = (rootId) => {
+    const ids = [rootId];
+    const walk = (pid) => journal.folders.filter(f => f.parentId === pid).forEach(f => { ids.push(f.id); walk(f.id); });
+    walk(rootId);
+    return ids;
+  };
+  const addFolder = () => {
+    const name = prompt("폴더 이름 (예: 2026-06, 6월 1주차, 06-08)");
+    if (!name || !name.trim()) return;
+    setJournal(j => ({ ...j, folders: [...j.folders, { id: uid(), name: name.trim(), parentId: curFolder, createdAt: new Date().toISOString() }] }));
+  };
+  const renameFolder = (id, e) => {
+    e.stopPropagation();
+    const f = journal.folders.find(x => x.id === id);
+    const name = prompt("폴더 이름 변경", f ? f.name : "");
+    if (!name || !name.trim()) return;
+    setJournal(j => ({ ...j, folders: j.folders.map(x => x.id === id ? { ...x, name: name.trim() } : x) }));
+  };
+  const deleteFolder = (id, e) => {
+    e.stopPropagation();
+    const ids = descendantFolderIds(id);
+    const noteCount = journal.notes.filter(n => ids.includes(n.folderId)).length;
+    const subCount = ids.length - 1;
+    if (!confirm(`이 폴더를 삭제할까?\n하위 폴더 ${subCount}개, 글 ${noteCount}개도 함께 삭제됨. 되돌릴 수 없음.`)) return;
+    setJournal(j => ({
+      folders: j.folders.filter(f => !ids.includes(f.id)),
+      notes: j.notes.filter(n => !ids.includes(n.folderId)),
+    }));
+    if (ids.includes(curFolder)) setCurFolder(null);
+  };
+  const newNote = () => { setDraft({ title: "", body: "", date: new Date().toISOString().slice(0, 10) }); setEditingId("new"); };
+  const openNote = (n) => { setDraft({ title: n.title, body: n.body, date: n.date }); setEditingId(n.id); };
+  const saveNote = () => {
+    if (!draft.body.trim() && !draft.title.trim()) { setEditingId(null); return; }
+    const now = new Date().toISOString();
+    if (editingId === "new") {
+      const n = { id: uid(), folderId: curFolder, title: draft.title.trim(), body: draft.body, date: draft.date || now.slice(0, 10), createdAt: now, updatedAt: now };
+      setJournal(j => ({ ...j, notes: [n, ...j.notes] }));
+    } else {
+      setJournal(j => ({ ...j, notes: j.notes.map(n => n.id === editingId ? { ...n, title: draft.title.trim(), body: draft.body, date: draft.date, updatedAt: now } : n) }));
+    }
+    setEditingId(null);
+    showToast("일지 저장됨");
+  };
+  const deleteNote = (id) => { if (confirm("이 글을 삭제할까?")) { setJournal(j => ({ ...j, notes: j.notes.filter(n => n.id !== id) })); setEditingId(null); } };
+  const folderPath = (id) => {
+    const path = []; let cur = id;
+    while (cur) { const f = journal.folders.find(x => x.id === cur); if (!f) break; path.unshift(f); cur = f.parentId; }
+    return path;
+  };
+  const exportJournal = () => {
+    const blob = new Blob([JSON.stringify(journal, null, 2)], { type: "application/json" });
+    const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = `journal_${new Date().toISOString().slice(0,10)}.json`; a.click();
+  };
+  const importJournal = () => {
+    const input = document.createElement("input"); input.type = "file"; input.accept = ".json";
+    input.onchange = (e) => {
+      const reader = new FileReader();
+      reader.onload = (ev) => { try { const d = JSON.parse(ev.target.result); if (d && Array.isArray(d.folders) && Array.isArray(d.notes)) { setJournal(d); showToast(`폴더 ${d.folders.length} · 글 ${d.notes.length}건 불러옴`); } else showToast("일지 형식 아님"); } catch { showToast("파일 형식 오류"); } };
+      reader.readAsText(e.target.files[0]);
+    };
+    input.click();
+  };
+
+  const subfolders = journal.folders.filter(f => (f.parentId || null) === (curFolder || null)).sort((a, b) => a.name.localeCompare(b.name, "ko"));
+  const notesHere = journal.notes.filter(n => (n.folderId || null) === (curFolder || null)).sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.createdAt || "").localeCompare(a.createdAt || ""));
+  const crumbs = folderPath(curFolder);
+
   const NavBtn = ({ id, children, badge }) => (
     <button onClick={() => setView(id)} className={"px-4 py-2.5 text-sm font-medium tracking-wide transition-all border-b-2 " + (view === id ? c.navActive : c.navInactive)}>
       {children}
@@ -256,6 +339,7 @@ function App() {
           <NavBtn id="gate">진입 게이트</NavBtn>
           <NavBtn id="positions" badge={open.length}>포지션</NavBtn>
           <NavBtn id="review" badge={closed.length}>복기</NavBtn>
+          <NavBtn id="journal" badge={journal.notes.length || null}>일지</NavBtn>
         </div>
 
         {/* ========== GATE ========== */}
@@ -507,6 +591,104 @@ function App() {
             )}
             {trades.length > 0 && (
               <button onClick={() => { if (confirm("모든 기록을 삭제할까? 되돌릴 수 없음.")) { setTrades([]); showToast("초기화 완료"); }}} className={"text-xs transition-colors mt-4 " + c.textMuted + " hover:text-rose-500"}>전체 데이터 초기화</button>
+            )}
+          </div>
+        )}
+
+        {/* ========== JOURNAL ========== */}
+        {view === "journal" && (
+          <div className="space-y-4">
+            {editingId === null ? (
+              <>
+                {/* breadcrumb + actions */}
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex flex-wrap items-center gap-1 text-sm">
+                    <button onClick={() => setCurFolder(null)} className={"transition-colors " + (curFolder === null ? c.text + " font-semibold" : c.textSub + " hover:text-amber-600")}>📁 전체</button>
+                    {crumbs.map(f => (
+                      <span key={f.id} className="flex items-center gap-1">
+                        <span className={c.textMuted}>/</span>
+                        <button onClick={() => setCurFolder(f.id)} className={"transition-colors " + (curFolder === f.id ? c.text + " font-semibold" : c.textSub + " hover:text-amber-600")}>{f.name}</button>
+                      </span>
+                    ))}
+                  </div>
+                  <div className="flex gap-2">
+                    <button onClick={addFolder} className={"rounded-md border px-3 py-1.5 text-xs transition-colors " + c.btnSecondary}>+ 폴더</button>
+                    <button onClick={newNote} className={"rounded-md px-3 py-1.5 text-xs font-medium transition-colors " + c.btnPrimary}>+ 새 글</button>
+                  </div>
+                </div>
+
+                {/* subfolders */}
+                {subfolders.length > 0 && (
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                    {subfolders.map(f => {
+                      const ids = descendantFolderIds(f.id);
+                      const cnt = journal.notes.filter(n => ids.includes(n.folderId)).length;
+                      return (
+                        <div key={f.id} onClick={() => setCurFolder(f.id)} className={"group cursor-pointer rounded-lg border p-3 transition-colors " + c.border + " " + c.borderHover + " " + c.cardInner}>
+                          <div className="flex items-start justify-between">
+                            <span className="text-lg leading-none">📁</span>
+                            <div className="flex gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button onClick={(e) => renameFolder(f.id, e)} className={"text-xs " + c.textMuted + " hover:text-amber-600"}>✎</button>
+                              <button onClick={(e) => deleteFolder(f.id, e)} className={"text-xs " + c.textMuted + " hover:text-rose-500"}>✕</button>
+                            </div>
+                          </div>
+                          <div className={"mt-2 truncate text-sm font-medium " + c.text}>{f.name}</div>
+                          <div className={"text-xs " + c.textMuted}>{cnt}개</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {/* notes in this folder */}
+                {notesHere.length === 0 && subfolders.length === 0 ? (
+                  <div className={c.card + " p-10 text-center text-sm " + c.textSub}>
+                    {curFolder === null ? "아직 일지가 없음." : "이 폴더는 비어있음."}<br/>
+                    <span className={c.textMuted}>폴더로 월·일을 나누고, 줄글로 그날의 생각을 남겨라.</span>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {notesHere.map(n => (
+                      <div key={n.id} onClick={() => openNote(n)} className={"cursor-pointer rounded-lg border p-4 transition-colors " + c.closedBg + " " + c.borderHover}>
+                        <div className="flex items-baseline justify-between gap-3">
+                          <span className={"truncate text-sm font-semibold " + c.text}>{n.title || "(제목 없음)"}</span>
+                          <span className={"shrink-0 font-mono text-xs " + c.textMuted}>{fmtDate(n.date)}</span>
+                        </div>
+                        <p className={"mt-1.5 line-clamp-2 whitespace-pre-wrap text-xs leading-relaxed " + c.textSub}>{n.body || "—"}</p>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className={"flex gap-3 pt-2 text-xs"}>
+                  <button onClick={exportJournal} className={c.textMuted + " hover:text-amber-600 transition-colors"}>↓ 일지 내보내기</button>
+                  <button onClick={importJournal} className={c.textMuted + " hover:text-amber-600 transition-colors"}>↑ 일지 불러오기</button>
+                </div>
+              </>
+            ) : (
+              /* ---- editor ---- */
+              <div className={c.card + " p-5 sm:p-6"}>
+                <div className="mb-4 flex items-center justify-between">
+                  <button onClick={() => setEditingId(null)} className={"text-sm transition-colors " + c.textSub + " hover:text-amber-600"}>← 목록</button>
+                  <div className="flex items-center gap-3">
+                    {editingId !== "new" && <button onClick={() => deleteNote(editingId)} className={"text-xs transition-colors " + c.textMuted + " hover:text-rose-500"}>삭제</button>}
+                    <button onClick={saveNote} className={"rounded-md px-4 py-1.5 text-xs font-medium transition-colors " + c.btnPrimary}>저장</button>
+                  </div>
+                </div>
+                <div className="mb-3 flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4">
+                  <input className={c.input + " sm:flex-1"} value={draft.title} onChange={e => setDraft(d => ({ ...d, title: e.target.value }))} placeholder="제목 (선택)" />
+                  <input type="date" className={c.input + " sm:w-44"} value={draft.date} onChange={e => setDraft(d => ({ ...d, date: e.target.value }))} />
+                </div>
+                <textarea
+                  autoFocus
+                  className={c.input + " resize-none leading-relaxed"}
+                  style={{ minHeight: "55vh", fontSize: "0.95rem" }}
+                  value={draft.body}
+                  onChange={e => setDraft(d => ({ ...d, body: e.target.value }))}
+                  placeholder={"그날의 시장, 포지션, 심리, 판단을 줄글로.\n\n맞았든 틀렸든 '왜 그렇게 생각했는지'를 남겨두면 나중에 복기할 때 가장 비싼 데이터가 된다."}
+                />
+                {crumbs.length > 0 && <p className={"mt-2 text-xs " + c.textMuted}>저장 위치: {crumbs.map(f => f.name).join(" / ")}</p>}
+              </div>
             )}
           </div>
         )}
